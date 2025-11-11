@@ -22,6 +22,7 @@ class SAP_BasedInvoiceSenderTest {
      * This test verifies that:
      * 1. FilterInvoice.lowValueInvoices() is called to get the invoices
      * 2. For each invoice returned, sap.send() is called
+     * 3. When all invoices succeed, the method returns an empty list
      * 
      * How this test works:
      * - We create MOCKS (fake objects) for both FilterInvoice and SAP
@@ -53,8 +54,8 @@ class SAP_BasedInvoiceSenderTest {
         // Create the system under test (SUT) with mocked dependencies
         SAP_BasedInvoiceSender sender = new SAP_BasedInvoiceSender(mockFilter, mockSap);
 
-        // Act: Call the method we're testing
-        sender.sendLowValuedInvoices();
+        // Act: Call the method we're testing (now returns List<Invoice> of failures)
+        List<Invoice> failedInvoices = sender.sendLowValuedInvoices();
 
         // Assert: VERIFY that the mocked SAP.send() method was called for each invoice
         // verify() is a Mockito method that checks if a method was called on a mock object
@@ -68,6 +69,9 @@ class SAP_BasedInvoiceSenderTest {
 
         // Verify that lowValueInvoices() was called exactly once
         verify(mockFilter, times(1)).lowValueInvoices();
+
+        // Verify that no invoices failed (all succeeded)
+        assert failedInvoices.isEmpty() : "Expected no failed invoices";
     }
 
     /**
@@ -76,6 +80,7 @@ class SAP_BasedInvoiceSenderTest {
      * This test verifies that:
      * 1. When filter returns an empty list, no SAP operations are performed
      * 2. The method handles empty lists gracefully without errors
+     * 3. Returns an empty list (no failures since nothing was attempted)
      * 
      * How this test works:
      * - We create MOCKS for FilterInvoice and SAP
@@ -98,7 +103,7 @@ class SAP_BasedInvoiceSenderTest {
         SAP_BasedInvoiceSender sender = new SAP_BasedInvoiceSender(mockFilter, mockSap);
 
         // Act: Call the method being tested
-        sender.sendLowValuedInvoices();
+        List<Invoice> failedInvoices = sender.sendLowValuedInvoices();
 
         // Assert: VERIFY that sap.send() was NEVER called
         // never() is equivalent to times(0) - ensures the method was not invoked at all
@@ -108,6 +113,73 @@ class SAP_BasedInvoiceSenderTest {
         // verify(mockSap, times(0)).send(any(Invoice.class));
 
         // Verify that lowValueInvoices() was still called (to get the empty list)
+        verify(mockFilter, times(1)).lowValueInvoices();
+
+        // Verify that no failures are returned (empty in = empty out)
+        assert failedInvoices.isEmpty() : "Expected no failed invoices";
+    }
+
+    /**
+     * Test case: When SAP throws an exception for one invoice, verify:
+     * 1. The exception is caught and handled gracefully
+     * 2. Processing continues for remaining invoices
+     * 3. The failed invoice is returned in the result list
+     * 
+     * This test demonstrates the error handling requirement (Requirement 3):
+     * - One bad invoice should NOT stop the entire batch
+     * - System must be resilient to failures
+     * 
+     * How this test works:
+     * - We create MOCKS for FilterInvoice and SAP
+     * - We STUB filter to return a list with 3 invoices
+     * - We use doThrow().when() to make SAP throw an exception for the SECOND invoice only
+     * - We verify that:
+     *   a) sap.send() is called 3 times (all invoices are attempted)
+     *   b) The failed invoice is returned in the result list
+     *   c) The system doesn't crash or throw an unhandled exception
+     */
+    @Test
+    void testThrowExceptionWhenBadInvoice() {
+        // Arrange: Create mock objects
+        FilterInvoice mockFilter = Mockito.mock(FilterInvoice.class);
+        SAP mockSap = Mockito.mock(SAP.class);
+
+        // Create test invoices - second one will fail
+        Invoice goodInvoice1 = new Invoice("Good Customer 1", 50);
+        Invoice badInvoice = new Invoice("Bad Customer", 75);    // This one will fail
+        Invoice goodInvoice2 = new Invoice("Good Customer 2", 99);
+
+        List<Invoice> testInvoices = Arrays.asList(goodInvoice1, badInvoice, goodInvoice2);
+
+        // STUB the filter to return our test invoices
+        when(mockFilter.lowValueInvoices()).thenReturn(testInvoices);
+
+        // STUB SAP to throw an exception when trying to send the "bad" invoice
+        // doThrow().when() is Mockito's way to make a mock throw an exception
+        // We specify that ONLY when send(badInvoice) is called, throw FailToSendSAPInvoiceException
+        doThrow(new FailToSendSAPInvoiceException("SAP system error"))
+                .when(mockSap).send(badInvoice);
+
+        // Create the system under test
+        SAP_BasedInvoiceSender sender = new SAP_BasedInvoiceSender(mockFilter, mockSap);
+
+        // Act: Call the method - should NOT throw an exception (should catch it internally)
+        List<Invoice> failedInvoices = sender.sendLowValuedInvoices();
+
+        // Assert: VERIFY that sap.send() was called for ALL 3 invoices
+        // This proves that processing continued after the exception
+        verify(mockSap, times(3)).send(any(Invoice.class));
+        verify(mockSap).send(goodInvoice1);  // First invoice was sent
+        verify(mockSap).send(badInvoice);     // Second invoice was attempted (threw exception)
+        verify(mockSap).send(goodInvoice2);  // Third invoice was still sent despite #2 failing
+
+        // Verify that ONLY the bad invoice is in the failed list
+        assert failedInvoices.size() == 1 : "Expected exactly 1 failed invoice";
+        assert failedInvoices.contains(badInvoice) : "Expected the bad invoice to be in failed list";
+        assert !failedInvoices.contains(goodInvoice1) : "Good invoice 1 should not be in failed list";
+        assert !failedInvoices.contains(goodInvoice2) : "Good invoice 2 should not be in failed list";
+
+        // Verify that the filter was called
         verify(mockFilter, times(1)).lowValueInvoices();
     }
 }
